@@ -2882,26 +2882,60 @@
 
         function previewDocs(id,type) {
             const b=bookings.find(x=>x.id===id); if(!b)return;
-            $('preview-modal-title').textContent=type==='memo'?'Lampiran Memo Perencanaan':'Lampiran Struk BBM SPBU';
+            $('preview-modal-title').textContent=type==='memo'?'Pratinjau Memo Perencanaan':'Pratinjau Struk BBM SPBU';
             const memoVal = memoAttachmentOf(b);
-            const docs=type==='memo'
-                ? [{name:b.noMemo||'Memo Perencanaan', url: typeof memoVal === 'object' ? (memoVal?.driveUrl || memoVal?.url) : memoVal}]
-                : (b.strukList||[]).filter(x=>x.dataUrl||x.driveUrl||x.url).map((x,i)=>({name:x.noNota||`Struk SPBU #${i+1}`, url: x.driveUrl || x.url || x.dataUrl}));
-            
-            $('preview-modal-content').innerHTML=docs.length?docs.map(d=>{
-                const u = String(d.url || '');
-                const isDriveOrPdf = u.startsWith('http') || u.startsWith('data:application/pdf');
-                return `
-                <div class="p-3.5 border rounded-2xl bg-slate-50 space-y-2">
-                    <p class="font-bold text-xs text-slate-800">${esc(d.name)}</p>
-                    ${isDriveOrPdf?`
-                        <a class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-uns-blue hover:bg-uns-light text-white text-xs font-bold transition shadow-sm" href="${esc(u)}" target="_blank" rel="noopener">
-                            <i class="fa-solid fa-up-right-from-square"></i> Buka Dokumen Lengkap
-                        </a>
-                    `:`<img src="${esc(u)}" alt="${esc(d.name)}" class="max-w-full rounded-xl border border-slate-200 shadow-sm mx-auto">`}
-                </div>`;
-            }).join(''):'<p class="text-xs text-slate-500 py-4 text-center">Tidak ada lampiran tersimpan.</p>';
-            
+            const rawDocs = type==='memo'
+                ? [typeof memoVal === 'object' && memoVal ? memoVal : {url:memoVal, name:b.noMemo||'Memo Perencanaan'}]
+                : (Array.isArray(b.strukList)?b.strukList:[]);
+
+            const getDriveId = x => {
+                const raw=String(x?.driveUrl||x?.url||x?.webViewLink||x?.webContentLink||'');
+                return x?.driveFileId||x?.fileId||x?.fileUniqueId||
+                    (raw.match(/(?:\/file\/d\/|[?&]id=)([a-zA-Z0-9_-]{10,})/)||[])[1]||'';
+            };
+            const docs=rawDocs.map((x,i)=>{
+                if(typeof x==='string') x={url:x};
+                const data=x?.localDataUrl||x?.dataUrl||'';
+                const raw=String(x?.driveUrl||x?.url||x?.webViewLink||x?.webContentLink||data||'');
+                const id=getDriveId(x);
+                const mime=String(x?.mimeType||x?.mime_type||'').toLowerCase();
+                const isPdf=mime.includes('pdf')||raw.startsWith('data:application/pdf')||/\.pdf(?:[?#]|$)/i.test(raw);
+                let previewUrl=raw;
+                let kind='image';
+                if(id) {
+                    if(isPdf || type==='memo') { previewUrl=`https://drive.google.com/file/d/${encodeURIComponent(id)}/preview`; kind='iframe'; }
+                    else { previewUrl=`https://drive.google.com/thumbnail?id=${encodeURIComponent(id)}&sz=w1600`; kind='image'; }
+                } else if(isPdf) kind='iframe';
+                else if(raw.startsWith('http') && !/^https?:\/\/[^/]+\/.+\.(?:png|jpe?g|gif|webp)(?:[?#]|$)/i.test(raw)) {
+                    // Link dokumen umum dicoba sebagai pratinjau tertanam.
+                    kind='iframe';
+                }
+                return {
+                    name:x?.noNota||x?.name||x?.fileName|| (type==='memo'?'Memo Perencanaan':`Struk SPBU #${i+1}`),
+                    url:previewUrl, kind, fallback:id?`https://drive.google.com/uc?export=view&id=${encodeURIComponent(id)}`:'',
+                    direct:data.startsWith('data:image/')?data:''
+                };
+            }).filter(d=>d.url||d.direct);
+
+            $('preview-modal-content').innerHTML=docs.length?docs.map((d,i)=>`
+                <section class="p-3 border rounded-2xl bg-slate-50 space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                        <p class="font-bold text-xs text-slate-800">${esc(d.name)}</p>
+                        <a class="text-[11px] font-bold text-uns-blue underline shrink-0" href="${esc(d.url||d.direct)}" target="_blank" rel="noopener">Buka penuh</a>
+                    </div>
+                    ${d.kind==='iframe' ? `
+                        <iframe src="${esc(d.url)}" title="${esc(d.name)}" loading="lazy"
+                          class="w-full rounded-xl border border-slate-200 bg-white" style="height:min(72vh,760px)"
+                          allow="autoplay"></iframe>
+                    ` : `
+                        <img src="${esc(d.direct||d.url)}" data-fallback="${esc(d.fallback)}"
+                          alt="${esc(d.name)}" loading="lazy"
+                          onerror="if(this.dataset.fallback && this.src!==this.dataset.fallback){this.src=this.dataset.fallback;this.dataset.fallback='';}else{this.alt='Pratinjau tidak tersedia. Periksa izin akses Google Drive.';this.style.minHeight='100px';}"
+                          class="block max-w-full max-h-[72vh] rounded-xl border border-slate-200 shadow-sm mx-auto object-contain bg-white">
+                    `}
+                </section>
+            `).join(''):'<p class="text-xs text-slate-500 py-4 text-center">Tidak ada lampiran tersimpan.</p>';
+
             $('preview-modal').classList.remove('hidden');$('preview-modal').classList.add('flex');
         }
 
