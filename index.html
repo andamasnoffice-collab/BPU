@@ -2974,7 +2974,7 @@
         import { getDatabase, ref, get, set, runTransaction } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
 
         const SIMKENDIS_CONFIG = {
-            apiKey: "AIzaSyADJoMRWZPS-vJl3U3cRgxydFGWeqs326Y4",
+            apiKey: "AIzaSyBbsJqNufXBFVJTXBG8gogN-v90V7tVjXc",
             authDomain: "fleet-transaction-management.firebaseapp.com",
             databaseURL: "https://fleet-transaction-management-default-rtdb.asia-southeast1.firebasedatabase.app",
             projectId: "fleet-transaction-management",
@@ -2989,85 +2989,74 @@
         catch (_) { mainAuth = getAuth(mainApp); }
         const mainDb = getDatabase(mainApp);
 
-        const BOOKING_PATH = 'simkendis/bookings'; // sumber lama untuk migrasi satu kali
+        // Sumber data aktif bersama SIMKENDIS: data terbaru per tahun.
+        // Jalur legacy dan flag migrasi tidak lagi dibaca atau ditulis.
         const BOOKINGS_BY_YEAR_PATH = 'simkendis/bookingsByYear';
         const SETTINGS_PATH = 'simkendis/settings';
         const DEST_PATH = 'simkendis/destinations';
-        const MIGRATION_FLAG_PATH = 'simkendis/migrations/bookingsByYearV1';
         let selectedBookingYear = String(new Date().getFullYear());
         let knownBookings = new Map();
-        let migrationPromise = null;
         let cloudReady = false;
         let activeCloudEndpoint = null;
         let mainAuthBlocked = false;
+        let mainTokenPromise = null;
 
         async function getMainToken(forceRefresh = false) {
             if (mainAuthBlocked) return null;
-            try {
-                if (!mainAuth.currentUser) await signInAnonymously(mainAuth);
-                const user = mainAuth.currentUser;
-                if (!user) return null;
-                return await user.getIdToken(forceRefresh);
-            } catch (err) {
-                const code = String(err?.code || '');
-                const message = String(err?.message || err || '');
-                if (/admin-restricted-operation|operation-not-allowed/i.test(code + ' ' + message)) {
-                    mainAuthBlocked = true;
+            if (mainTokenPromise && !forceRefresh) return mainTokenPromise;
+            const pending = (async () => {
+                try {
+                    if (!mainAuth.currentUser) await signInAnonymously(mainAuth);
+                    const user = mainAuth.currentUser;
+                    if (!user) throw new Error('Firebase Anonymous Auth tidak menghasilkan sesi pengguna.');
+                    return await user.getIdToken(!!forceRefresh);
+                } catch (err) {
+                    const code = String(err?.code || '');
+                    const message = String(err?.message || err || '');
+                    if (/admin-restricted-operation|operation-not-allowed/i.test(code + ' ' + message)) mainAuthBlocked = true;
+                    console.error('BPU Firebase Auth gagal:', code, message);
+                    return null;
                 }
-                return null;
-            }
+            })();
+            mainTokenPromise = pending;
+            try { return await pending; }
+            finally { if (mainTokenPromise === pending) mainTokenPromise = null; }
         }
 
         async function restReadSafe(baseUrl, path, tokenFn) {
             try {
-                let token = tokenFn ? await tokenFn(false) : null;
-                const buildUrl = (t) => `${baseUrl}/${path}.json?${t ? `auth=${encodeURIComponent(t)}&` : ''}ts=${Date.now()}`;
-                let response = await fetch(buildUrl(token), { cache: 'no-store' });
-                if ((response.status === 401 || response.status === 403) && tokenFn && token) {
-                    response = await fetch(buildUrl(null), { cache: 'no-store' });
+                if (!tokenFn) return {ok:false,status:401,error:'Token Firebase wajib tersedia.'};
+                let token = await tokenFn(false);
+                if (!token) return {ok:false,status:401,error:'Firebase belum terautentikasi. Periksa Anonymous Sign-in dan API key.'};
+                const buildUrl = t => `${baseUrl}/${path}.json?auth=${encodeURIComponent(t)}&ts=${Date.now()}`;
+                let response = await fetch(buildUrl(token), {cache:'no-store'});
+                if (response.status===401 || response.status===403) {
+                    token = await tokenFn(true);
+                    if (!token) return {ok:false,status:response.status,error:'Token Firebase ditolak dan gagal diperbarui.'};
+                    response = await fetch(buildUrl(token), {cache:'no-store'});
                 }
-                if (!response.ok) return { ok: false, status: response.status, error: `HTTP ${response.status}` };
-                const data = await response.json();
-                return { ok: true, status: 200, data };
-            } catch (err) {
-                return { ok: false, status: 0, error: err?.message || String(err) };
-            }
-        }
-
-        async function restWriteSafe(baseUrl, path, value, tokenFn) {
-            try {
-                let token = tokenFn ? await tokenFn(false) : null;
-                const buildUrl = (t) => `${baseUrl}/${path}.json${t ? `?auth=${encodeURIComponent(t)}` : ''}`;
-                const payload = JSON.stringify(value ?? []);
-                let response = await fetch(buildUrl(token), {method:'PUT',headers:{'Content-Type':'application/json'},body:payload});
-                if ((response.status === 401 || response.status === 403) && tokenFn && token) {
-                    response = await fetch(buildUrl(null), {method:'PUT',headers:{'Content-Type':'application/json'},body:payload});
-                }
-                if (!response.ok) return {ok:false,status:response.status,error:`HTTP ${response.status}`};
+                if (!response.ok) return {ok:false,status:response.status,error:`HTTP ${response.status}: ${(await response.text()).slice(0,180)}`};
                 return {ok:true,status:200,data:await response.json()};
             } catch(err) { return {ok:false,status:0,error:err?.message||String(err)}; }
         }
 
-        async function migrateLegacyBookingsOnce() {
-            if (migrationPromise) return migrationPromise;
-            migrationPromise = (async()=>{
-                const flag = await get(ref(mainDb,MIGRATION_FLAG_PATH));
-                if (flag.exists() && flag.val()===true) return;
-                const legacy = await get(ref(mainDb,BOOKING_PATH));
-                if (legacy.exists()) {
-                    const grouped = new Map();
-                    for (const record of normalizeBookingsList(legacy.val())) {
-                        const year = String(record.tanggal||'').match(/^(20\d{2})/)?.[1] || String(new Date().getFullYear());
-                        if (!grouped.has(year)) grouped.set(year,{});
-                        grouped.get(year)[record.id]=record;
-                    }
-                    for (const [year,records] of grouped) {
-                        await runTransaction(ref(mainDb,`${BOOKINGS_BY_YEAR_PATH}/${year}`),current=>({...records,...((current&&typeof current==='object')?current:{})}),{applyLocally:false});
-                    }
+        async function restWriteSafe(baseUrl, path, value, tokenFn) {
+            try {
+                if (!tokenFn) return {ok:false,status:401,error:'Token Firebase wajib tersedia.'};
+                let token = await tokenFn(false);
+                if (!token) return {ok:false,status:401,error:'Firebase belum terautentikasi. Periksa Anonymous Sign-in dan API key.'};
+                const buildUrl = t => `${baseUrl}/${path}.json?auth=${encodeURIComponent(t)}`;
+                const payload = JSON.stringify(value ?? []);
+                const send = t => fetch(buildUrl(t), {method:'PUT',headers:{'Content-Type':'application/json'},body:payload});
+                let response = await send(token);
+                if (response.status===401 || response.status===403) {
+                    token = await tokenFn(true);
+                    if (!token) return {ok:false,status:response.status,error:'Token Firebase ditolak dan gagal diperbarui.'};
+                    response = await send(token);
                 }
-                await set(ref(mainDb,MIGRATION_FLAG_PATH),true);
-            })().catch(err=>{migrationPromise=null;throw err;});
-            return migrationPromise;
+                if (!response.ok) return {ok:false,status:response.status,error:`HTTP ${response.status}: ${(await response.text()).slice(0,180)}`};
+                return {ok:true,status:200,data:await response.json()};
+            } catch(err) { return {ok:false,status:0,error:err?.message||String(err)}; }
         }
 
         function recordYear(record) { return String(record?.tanggal||'').match(/^(20\d{2})/)?.[1] || selectedBookingYear; }
@@ -3216,7 +3205,7 @@
 
         async function loadBookingsFromCloud(year = selectedBookingYear) {
             try {
-                await migrateLegacyBookingsOnce();
+                // Selalu gunakan data terbaru dari bookingsByYear/{tahun}; tanpa fallback legacy.
                 const snap=await get(ref(mainDb,`${BOOKINGS_BY_YEAR_PATH}/${year}`));
                 const raw=snap.exists()?snap.val():{};
                 const data=normalizeBookingsList(Object.values(raw||{}).filter(v=>v&&v._deleted!==true));
@@ -3269,6 +3258,15 @@
 
         window.SIMKENDIS_FIREBASE = {
             async init() {
+                ready = false;
+                const authToken = await getMainToken(false);
+                if (!authToken) {
+                    cloudReady = false;
+                    window.dispatchEvent(new CustomEvent('simkendis-firebase-status',{detail:{
+                        ok:false,message:'Autentikasi Firebase BPU gagal',detail:'Periksa API key dan aktifkan Anonymous Sign-in.'
+                    }}));
+                    return false;
+                }
                 ready = true;
                 
                 // Prioritaskan pembacaan Master Settings dari Firebase Cloud terlebih dahulu
