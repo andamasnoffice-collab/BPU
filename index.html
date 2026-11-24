@@ -246,8 +246,8 @@
                     <div class="flex items-center gap-1.5 flex-1 sm:flex-none">
                         <span class="text-[11px] font-bold text-slate-400 shrink-0">Urut:</span>
                         <select id="sort-bookings" onchange="renderTable()" aria-label="Urutkan jadwal" class="w-full sm:w-auto px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold bg-white text-slate-700 outline-none focus:ring-2 focus:ring-uns-blue cursor-pointer">
-                            <option value="date-desc">Tanggal: Terbaru</option>
-                            <option value="date-asc">Tanggal: Terlama</option>
+                            <option value="date-desc">Masuk BPU: Terbaru</option>
+                            <option value="date-asc">Masuk BPU: Terlama</option>
                             <option value="borrower-asc">Peminjam: A–Z</option>
                             <option value="borrower-desc">Peminjam: Z–A</option>
                             <option value="destination-asc">Tujuan: A–Z</option>
@@ -2667,14 +2667,31 @@
 
                 return matches && (currentMemoSourceFilter==='ALL'||source===currentMemoSourceFilter) && (fm==='ALL'||(memoIsEffectivelyPaid(b)?'Sudah Cair':(b.statusMemo||'Belum Diajukan'))===fm) && (fs==='ALL'||(b.statusStruk||'Belum Ada')===fs) && tabMatch;
             });
-            const dateValue=b=>String(b.tanggal||'');
+            // Pengurutan tanggal pada halaman BPU harus mengikuti waktu booking diterima BPU,
+            // bukan tanggal perjalanan/event. Data tanpa timestamp BPU diletakkan di urutan paling bawah.
+            const bpuReceivedTime = b => {
+                const raw = b?.bpuSentAt || b?.bpuUpdatedAt || '';
+                if (!raw) return null;
+                const time = Date.parse(raw);
+                return Number.isFinite(time) ? time : null;
+            };
             filtered.sort((a,b)=>{
-                if(sortBy==='date-asc') return dateValue(a).localeCompare(dateValue(b));
+                if(sortBy==='date-asc' || sortBy==='date-desc') {
+                    const ta=bpuReceivedTime(a), tb=bpuReceivedTime(b);
+                    if(ta===null && tb===null) return 0;
+                    if(ta===null) return 1;
+                    if(tb===null) return -1;
+                    return sortBy==='date-asc' ? ta-tb : tb-ta;
+                }
                 if(sortBy==='borrower-asc') return String(a.peminjam||'').localeCompare(String(b.peminjam||''),'id',{sensitivity:'base'});
                 if(sortBy==='borrower-desc') return String(b.peminjam||'').localeCompare(String(a.peminjam||''),'id',{sensitivity:'base'});
                 if(sortBy==='destination-asc') return String(a.tujuanNama||'').localeCompare(String(b.tujuanNama||''),'id',{sensitivity:'base'});
                 if(sortBy==='memo-status') return String(memoIsEffectivelyPaid(a)?'Sudah Cair':(a.statusMemo||'Belum Diajukan')).localeCompare(String(memoIsEffectivelyPaid(b)?'Sudah Cair':(b.statusMemo||'Belum Diajukan')),'id');
-                return dateValue(b).localeCompare(dateValue(a));
+                const ta=bpuReceivedTime(a), tb=bpuReceivedTime(b);
+                if(ta===null && tb===null) return 0;
+                if(ta===null) return 1;
+                if(tb===null) return -1;
+                return tb-ta;
             });
             $('badge-count-bpu').textContent=bookings.filter(b=>!!b.isCompleted && b.bpuStatus==='Terkirim ke BPU' && !b.bpuArchived).length;
             $('badge-count-archive').textContent=bookings.filter(b=>!!b.isCompleted && b.bpuStatus==='Terkirim ke BPU' && !!b.bpuArchived).length;
